@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""claude-eta: let Claude report progress on long tasks to the status line.
+
+    claude-eta start "render edit" --eta 20m --total 6
+    claude-eta step                 # one step done
+    claude-eta step 2 --note "muxing audio"
+    claude-eta set --eta 5m         # re-estimate: 5 minutes left from now
+    claude-eta finish
+    claude-eta status
+    claude-eta clear
+
+State lives in ~/.claude/eta/<session_id>.json. The session ID comes from
+CLAUDE_CODE_SESSION_ID, which Claude Code sets for every Bash command, so the
+status line for the same session picks it up automatically.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import tempfile
+import time
+
+ETA_DIR = os.path.expanduser(os.environ.get("CLAUDE_ETA_DIR", "~/.claude/eta"))
+
+
+def parse_dur(s):
+    if s is None:
+        return None
+    s = str(s).strip().lower()
+    if re.fullmatch(r"\d+(\.\d+)?", s):
+        return float(s) * 60  # bare number = minutes
+    total = 0.0
+    parts = re.findall(r"(\d+(?:\.\d+)?)\s*(h|m|s)", s)
+    if not parts or "".join(n + u for n, u in parts) != re.sub(r"\s+", "", s):
+        sys.exit(f"claude-eta: can't parse duration {s!r} (try 90s, 15m, 1h30m)")
+    for n, u in parts:
+        total += float(n) * {"h": 3600, "m": 60, "s": 1}[u]
+    return total
+
+
+def session_id(args):
+    sid = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    if not sid:
+        sys.exit("claude-eta: no session id (CLAUDE_CODE_SESSION_ID unset); pass --session")
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", sid)
+
+
+def path_for(sid):
+    return os.path.join(ETA_DIR, f"{sid}.json")
+
+
+def load(sid):
+    try:
+        with open(path_for(sid)) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return None
+
+
+def save(sid, st):
+    os.makedirs(ETA_DIR, exist_ok=True)
+    st["updated"] = time.time()
+    fd, tmp = tempfile.mkstemp(dir=ETA_DIR, suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        json.dump(st, f)
+    os.replace(tmp, path_for(sid))
+
+
+def need(st):
+    if not st:
+        sys.exit("claude-eta: no task running; use `claude-eta start` first")
+    return st
+
+
+def main():
+    p = argparse.ArgumentParser(prog="claude-eta", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--session", help="override the session id")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("start", help="begin tracking a task")
+    s.add_argument("task")
+    s.add_argument("--eta", help="estimated total time, e.g. 20m")
+    s.add_argument("--total", type=int, help="number of steps")
+    s.add_argument("--note")
+
+    s = sub.add_parser("step", help="mark step(s) done")
+    s.add_argument("n", nargs="?", type=int, default=1)
+    s.add_argument("--note")
+
+    s = sub.add_parser("set", help="update fields")
+    s.add_argument("--task")
+    s.add_argument("--eta", help="time REMAINING from now, e.g. 5m")
+    s.add_argument("--done", type=int)
+    s.add_argument("--total", type=int)
+    s.add_argument("--note")
+
+    sub.add_parser("finish", help="mark the task complete")
+    sub.add_parser("status", help="print current state as JSON")
+    sub.add_parser("clear", help="remove the task")
+
+    a = p.parse_args()
+    sid = session_id(a)
+    now = time.time()
+    st = load(sid)
+
+    if a.cmd == "start":
+        st = {"task": a.task, "started": now, "eta_sec": parse_dur(a.eta),
+              "done": 0, "total": a.total, "note": a.note}
+    elif a.cmd == "step":
+        st = need(st)
+        st["done"] = (st.get("done") or 0) + a.n
+        if st.get("total"):
+            st["done"] = min(st["done"], st["total"])
+        st["note"] = a.note
+    elif a.cmd == "set":
+        st = need(st)
+        if a.task:
+            st["task"] = a.task
+        if a.eta is not None:
+            st["eta_sec"] = (now - st["started"]) + parse_dur(a.eta)
+        if a.done is not None:
+            st["done"] = a.done
+        if a.total is not None:
+            st["total"] = a.total
+        if a.note is not None:
+            st["note"] = a.note
+    elif a.cmd == "finish":
+        st = need(st)
+        st["finished"] = now
+        if st.get("total"):
+            st["done"] = st["total"]
+    elif a.cmd == "status":
+        print(json.dumps(st, indent=2) if st else "no task")
+        return
+    elif a.cmd == "clear":
+        try:
+            os.remove(path_for(sid))
+        except FileNotFoundError:
+            pass
+        return
+
+    save(sid, st)
+
+
+if __name__ == "__main__":
+    main()
