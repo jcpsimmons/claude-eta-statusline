@@ -2,9 +2,7 @@
 
 A live ETA progress bar for long Claude Code tasks, in the status line.
 
-```
-Opus 5.5 │ my-app (master) │ ⠹ render edit ████████▍░░░░░░░ 52% 3/6 ~7m left · muxing audio
-```
+![Claude Code with the ETA progress bar in its status line](docs/screenshot.png)
 
 Claude estimates how long a job will take, reports each finished step, and the status line draws a bar with the time left. It ticks every second, so it keeps moving during long silent commands like a 20-minute build.
 
